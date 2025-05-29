@@ -4,4 +4,4 @@ __pycache__/
 
 debug_ocr_images/
 processed_gray_plates/
-processed_wraped_color_plates/
+processed_warped_color_plates
