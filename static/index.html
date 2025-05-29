@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>WebRTC LPR Service - Tailwind</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            /* Custom styles if needed, but Tailwind should cover most */
+            /* video {
+                transform: scaleX(-1); // Removed for non-mirrored view for rear camera
+            } */
+        </style>
+    </head>
+    <body class="bg-gray-900 text-gray-200 min-h-screen flex flex-col items-center justify-center p-4 selection:bg-sky-500 selection:text-white">
+
+        <div class="container mx-auto max-w-3xl w-full space-y-8">
+            <header class="text-center">
+                <h1 class="text-4xl font-bold text-sky-400">WebRTC License Plate Recognition</h1>
+                <p class="text-gray-400 mt-2 text-lg">Connect your camera, then capture an image for prediction.</p>
+            </header>
+
+            <main class="space-y-6">
+                <section class="video-display-area bg-gray-800 p-6 rounded-xl shadow-2xl">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="local-video-wrapper text-center">
+                            <h2 class="text-2xl font-semibold mb-3 text-sky-300">Entry Camera</h2>
+                            <div class="aspect-video max-w-md mx-auto bg-black rounded-lg overflow-hidden shadow-lg">
+                                <video id="localVideoEntry" class="w-full h-full object-cover" autoplay playsinline muted></video>
+                            </div>
+                        </div>
+                        <div class="local-video-wrapper text-center">
+                            <h2 class="text-2xl font-semibold mb-3 text-teal-300">Exit Camera</h2>
+                            <div class="aspect-video max-w-md mx-auto bg-black rounded-lg overflow-hidden shadow-lg">
+                                <video id="localVideoExit" class="w-full h-full object-cover" autoplay playsinline muted></video>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="controls-area">
+                    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 items-center justify-center">
+                        <button
+                            onclick="start('entry')"
+                            id="startEntryButton"
+                            class="w-full bg-blue-500 hover:bg-blue-600 focus:ring-4 focus:ring-blue-400/50 text-white font-semibold py-3 px-6 rounded-lg shadow-lg transition-all duration-150 ease-in-out transform hover:scale-105">
+                            Start Entry
+                        </button>
+                        <button
+                            onclick="start('exit')"
+                            id="startExitButton"
+                            class="w-full bg-teal-500 hover:bg-teal-600 focus:ring-4 focus:ring-teal-400/50 text-white font-semibold py-3 px-6 rounded-lg shadow-lg transition-all duration-150 ease-in-out transform hover:scale-105">
+                            Start Exit
+                        </button>
+                        
+                        <button 
+                            onclick="captureAndPredict('entry')" 
+                            id="captureEntryButton" 
+                            disabled 
+                            class="w-full bg-green-600 hover:bg-green-700 focus:ring-4 focus:ring-green-500/50 disabled:bg-gray-600 disabled:text-gray-400 disabled:cursor-not-allowed disabled:transform-none text-white font-semibold py-3 px-6 rounded-lg shadow-lg transition-all duration-150 ease-in-out transform hover:scale-105">
+                            Capture Entry
+                        </button>
+                        <button 
+                            onclick="captureAndPredict('exit')" 
+                            id="captureExitButton" 
+                            disabled 
+                            class="w-full bg-lime-600 hover:bg-lime-700 focus:ring-4 focus:ring-lime-500/50 disabled:bg-gray-600 disabled:text-gray-400 disabled:cursor-not-allowed disabled:transform-none text-white font-semibold py-3 px-6 rounded-lg shadow-lg transition-all duration-150 ease-in-out transform hover:scale-105">
+                            Capture Exit
+                        </button>
+                        
+                        <button 
+                            onclick="stopAllStreams()" 
+                            id="stopAllButton"
+                            class="w-full bg-red-600 hover:bg-red-700 focus:ring-4 focus:ring-red-500/50 text-white font-semibold py-3 px-6 rounded-lg shadow-lg transition-all duration-150 ease-in-out transform hover:scale-105 col-span-2 sm:col-span-1 lg:col-span-1">
+                            Stop All
+                        </button>
+                        <!-- Individual stop buttons can be added if fine-grained control is often needed -->
+                        <!-- 
+                        <button onclick="stopStream('entry')" id="stopEntryButton" class="...">Stop Entry</button>
+                        <button onclick="stopStream('exit')" id="stopExitButton" class="...">Stop Exit</button>
+                        -->
+                    </div>
+                </section>
+
+                <section id="predictionResultWrapper" class="bg-gray-800 p-6 rounded-xl shadow-2xl text-center">
+                    <h3 class="text-2xl font-semibold mb-4 text-sky-300">Prediction Output</h3>
+                    <div 
+                        id="predictionStatus" 
+                        class="text-xl min-h-[2.5em] flex items-center justify-center p-3 bg-gray-700/50 rounded-md mb-4 font-medium">
+                        Status: Idle
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-300">
+                        <div class="bg-gray-700 p-3 rounded-md">
+                            <p class="font-semibold text-sky-400">YOLO Confidence:</p>
+                            <span id="yoloConf" class="block mt-1">-</span>
+                        </div>
+                        <div class="bg-gray-700 p-3 rounded-md">
+                            <p class="font-semibold text-sky-400">OCR (Cleaned):</p>
+                            <span id="ocrTextCleaned" class="block mt-1 font-mono text-lg">-</span>
+                        </div>
+                        <div class="bg-gray-700 p-3 rounded-md">
+                            <p class="font-semibold text-sky-400">OCR Format Valid:</p>
+                            <span id="ocrFormatValid" class="block mt-1">-</span>
+                        </div>
+                    </div>
+                    <p id="predictionMessage" class="mt-4 text-gray-400 text-sm italic">Waiting for prediction...</p>
+                </section>
+            </main>
+
+            <footer class="text-center text-gray-500 text-sm mt-10 pb-4">
+                <p>Ensure camera permissions are granted. Use a secure connection (HTTPS or localhost) for camera access.</p>
+            </footer>
+        </div>
+
+        <script>
+            // Global state for managing multiple streams
+            const streams = {
+                entry: { 
+                    pc: null, 
+                    localStream: null, 
+                    videoElement: null, 
+                    captureButton: null,
+                    startButton: null,
+                    // stopButton: null, // For individual stop later if needed
+                    isConnected: false
+                },
+                exit: { 
+                    pc: null, 
+                    localStream: null, 
+                    videoElement: null, 
+                    captureButton: null,
+                    startButton: null,
+                    // stopButton: null, // For individual stop later if needed
+                    isConnected: false
+                }
+            };
+
+            // DOM Elements
+            streams.entry.videoElement = document.getElementById('localVideoEntry');
+            streams.exit.videoElement = document.getElementById('localVideoExit');
+            
+            streams.entry.startButton = document.getElementById('startEntryButton');
+            streams.exit.startButton = document.getElementById('startExitButton');
+
+            streams.entry.captureButton = document.getElementById('captureEntryButton');
+            streams.exit.captureButton = document.getElementById('captureExitButton');
+            
+            // Stop All button is handled by its own function directly for now
+            // const stopAllButton = document.getElementById('stopAllButton'); 
+            
+            const predictionStatusDiv = document.getElementById('predictionStatus');
+            const yoloConfSpan = document.getElementById('yoloConf');
+            const ocrTextCleanedSpan = document.getElementById('ocrTextCleaned');
+            const ocrFormatValidSpan = document.getElementById('ocrFormatValid');
+            const predictionMessageP = document.getElementById('predictionMessage');
+
+            function resetPredictionDisplay() {
+                predictionStatusDiv.textContent = "Status: Idle";
+                predictionStatusDiv.className = "text-xl min-h-[2.5em] flex items-center justify-center p-3 bg-gray-700/50 rounded-md mb-4 font-medium text-gray-200";
+                yoloConfSpan.textContent = '-';
+                ocrTextCleanedSpan.textContent = '-';
+                ocrFormatValidSpan.textContent = '-';
+                predictionMessageP.textContent = "Waiting for prediction...";
+            }
+
+            function updateStreamUI(streamType, isConnected, message = null) {
+                const stream = streams[streamType];
+                if (!stream) return;
+
+                stream.isConnected = isConnected;
+                stream.captureButton.disabled = !isConnected;
+                // Start button could be disabled if connected, enabled if not. 
+                // For simplicity, we allow "re-starting" which will stop the current and start new.
+                // stream.startButton.disabled = isConnected; 
+
+                if (message) {
+                    predictionStatusDiv.textContent = message;
+                }
+                // Update classes based on overall state or specific stream state if needed
+            }
+
+            async function start(streamType) {
+                if (!streams[streamType]) {
+                    console.error("Invalid streamType provided to start():", streamType);
+                    return;
+                }
+
+                // If this specific stream is already active, stop it first before restarting
+                if (streams[streamType].pc) {
+                    console.log(`Stream ${streamType} is already active. Stopping it before restarting.`);
+                    await stopStream(streamType);
+                }
+                
+                console.log(`Attempting to start camera and WebRTC connection for type: ${streamType}...`);
+                resetPredictionDisplay(); // Reset global prediction display
+                streams[streamType].captureButton.disabled = true;
+
+                try {
+                    streams[streamType].localStream = await navigator.mediaDevices.getUserMedia({
+                        audio: false,
+                        video: {
+                            facingMode: "environment",
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 }
+                        }
+                    });
+                    streams[streamType].videoElement.srcObject = streams[streamType].localStream;
+                    console.log(`Local camera stream acquired for ${streamType}.`);
+
+                    const pc = new RTCPeerConnection();
+                    streams[streamType].pc = pc;
+                    console.log(`RTCPeerConnection created for ${streamType}.`);
+                    
+                    pc.onicecandidate = event => { /* Optional: ICE candidate handling for ${streamType} */ };
+                    
+                    pc.ontrack = event => {
+                        console.log(`Server track event for ${streamType} (not displayed):`, event.track.kind);
+                        // If we were to display remote stream, it would be streams[streamType].remoteVideoElement.srcObject = event.streams[0];
+                    };
+
+                    pc.onconnectionstatechange = event => {
+                        const currentPC = streams[streamType].pc;
+                        if (pc !== currentPC) { // Stale event from an old PC instance for this streamType
+                            console.log(`Ignoring stale onconnectionstatechange event for ${streamType}`);
+                            return;
+                        }
+                        console.log(`PeerConnection state for ${streamType} changed to: ${pc.connectionState}`);
+                        if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
+                            updateStreamUI(streamType, true, `Status: ${streamType.toUpperCase()} Connected`);
+                            predictionStatusDiv.classList.remove('text-gray-200', 'bg-red-500/30', 'text-red-400');
+                            predictionStatusDiv.classList.add('text-green-300');
+                        } else {
+                            // If not connected/completed, disable capture. It might be connecting, failed, or disconnected.
+                            updateStreamUI(streamType, false);
+                            if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+                                 predictionStatusDiv.textContent = `Status: ${streamType.toUpperCase()} Disconnected`;
+                                 predictionStatusDiv.classList.remove('text-green-300');
+                                 predictionStatusDiv.classList.add('text-red-400', 'bg-red-500/30');
+                                 // Clean up resources for this specific stream if it truly closed/failed unexpectedly
+                                 // stopStream(streamType); // Be careful with auto-stopping, might conflict with user actions
+                            }
+                        }
+                    };
+
+                    streams[streamType].localStream.getTracks().forEach(track => {
+                        pc.addTrack(track, streams[streamType].localStream);
+                    });
+
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    
+                    const response = await fetch(`/${streamType}/offer`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            sdp: pc.localDescription.sdp, 
+                            type: pc.localDescription.type
+                        })
+                    }); 
+                    
+                    if (!response.ok) { 
+                        const errorText = await response.text();
+                        throw new Error(`Server responded with ${response.status} for ${streamType}: ${errorText}`);
+                     }
+                    
+                    const answerData = await response.json(); 
+                    if (answerData.error) {
+                        throw new Error(`Server error in answer for ${streamType}: ${answerData.error}`);
+                    }
+
+                    await pc.setRemoteDescription(new RTCSessionDescription({sdp: answerData.sdp, type: answerData.type}));
+                    console.log(`Remote description set for ${streamType}. WebRTC connection should be established.`);
+
+                } catch (e) {
+                    console.error(`Error during WebRTC start sequence for ${streamType}: `, e);
+                    alert(`Error starting WebRTC for ${streamType}: ${e.message}. Check console for details.`);
+                    await stopStream(streamType); // Ensure cleanup on error
+                    predictionStatusDiv.textContent = `Status: Error starting ${streamType.toUpperCase()}`;
+                    predictionStatusDiv.classList.add('text-red-400', 'bg-red-500/30');
+                }
+            }
+
+            async function captureAndPredict(streamType) {
+                const stream = streams[streamType];
+                if (!stream || !stream.pc || !stream.isConnected) {
+                    alert(`WebRTC connection for ${streamType} is not active. Please start the camera first.`);
+                    return;
+                }
+                console.log(`Sending capture request for ${streamType}`);
+                predictionStatusDiv.textContent = `Status: Capturing & Processing ${streamType.toUpperCase()}...`;
+                predictionStatusDiv.className = "text-xl min-h-[2.5em] flex items-center justify-center p-3 bg-gray-700/50 rounded-md mb-4 font-medium text-yellow-300";
+                stream.captureButton.disabled = true; // Disable specific capture button
+                
+                yoloConfSpan.textContent = 'Processing...';
+                ocrTextCleanedSpan.textContent = 'Processing...';
+                ocrFormatValidSpan.textContent = 'Processing...';
+                predictionMessageP.textContent = `Sending image from ${streamType} to server...`;
+
+                try {
+                    const response = await fetch(`/${streamType}/capture`);
+                    const result = await response.json();
+                    console.log(`Prediction result for ${streamType}:`, result);
+
+                    predictionMessageP.textContent = result.message || `Processing complete for ${streamType}.`;
+                    yoloConfSpan.textContent = result.yolo_confidence !== undefined ? result.yolo_confidence.toFixed(4) : 'N/A';
+                    ocrTextCleanedSpan.textContent = result.ocr_text_cleaned || 'N/A';
+                    ocrFormatValidSpan.textContent = result.ocr_format_valid !== undefined ? (result.ocr_format_valid ? 'Yes' : 'No') : 'N/A';
+
+                    if (result.status === "ok") {
+                        predictionStatusDiv.textContent = `Status: OK - ${streamType.toUpperCase()} Plate: ${result.ocr_text_cleaned}`;
+                        predictionStatusDiv.className = "text-xl min-h-[2.5em] flex items-center justify-center p-3 bg-green-600/50 rounded-md mb-4 font-medium text-green-300";
+                    } else {
+                        predictionStatusDiv.textContent = `Status: Error (${streamType.toUpperCase()})`;
+                        predictionStatusDiv.className = "text-xl min-h-[2.5em] flex items-center justify-center p-3 bg-red-600/50 rounded-md mb-4 font-medium text-red-300";
+                    }
+
+                } catch (e) {
+                    console.error(`Error during capture/prediction for ${streamType}: `, e);
+                    predictionStatusDiv.textContent = `Status: Failed (${streamType.toUpperCase()})`;
+                    predictionStatusDiv.classList.add('text-red-400', 'bg-red-500/30');
+                    predictionMessageP.textContent = `Client-side error for ${streamType}: ${e.message}. Check console.`;
+                    yoloConfSpan.textContent = 'Error';
+                    ocrTextCleanedSpan.textContent = 'Error';
+                    ocrFormatValidSpan.textContent = 'Error';
+                } finally {
+                    if (stream.pc && stream.isConnected) {
+                         stream.captureButton.disabled = false; // Re-enable specific capture button
+                    }
+                }
+            }
+
+            async function stopStream(streamType) { 
+                console.log(`Stopping WebRTC connection and camera for ${streamType}...`);
+                const stream = streams[streamType];
+                if (!stream) return;
+
+                if (stream.localStream) { 
+                    stream.localStream.getTracks().forEach(track => track.stop()); 
+                    stream.localStream = null; 
+                }
+                if (stream.pc) { 
+                    if (stream.pc.signalingState !== 'closed') stream.pc.close();
+                    stream.pc = null; 
+                }
+                if (stream.videoElement) stream.videoElement.srcObject = null; 
+                stream.captureButton.disabled = true;
+                stream.isConnected = false;
+                
+                // Check if the other stream is also disconnected to update global status, or set a generic one.
+                const otherStreamType = streamType === 'entry' ? 'exit' : 'entry';
+                if (!streams[otherStreamType] || !streams[otherStreamType].isConnected) {
+                    resetPredictionDisplay(); // If both are stopped, reset fully
+                    predictionStatusDiv.textContent = "Status: All streams stopped";
+                } else {
+                    predictionStatusDiv.textContent = `Status: ${streamType.toUpperCase()} stopped. ${otherStreamType.toUpperCase()} may still be active.`;
+                }
+                console.log(`WebRTC resources for ${streamType} released.`);
+            }
+            
+            async function stopAllStreams() {
+                console.log("Stopping all WebRTC connections and cameras...");
+                await stopStream('entry');
+                await stopStream('exit');
+                resetPredictionDisplay(); // Ensure a clean reset of the shared display
+                predictionStatusDiv.textContent = "Status: All streams stopped/disconnected";
+            }
+
+            // Initialize UI states on page load
+            function initializeUI() {
+                resetPredictionDisplay();
+                streams.entry.captureButton.disabled = true;
+                streams.exit.captureButton.disabled = true;
+                // Any other initial button states
+            }
+            initializeUI();
+
+        </script>
+    </body>
+</html> 
