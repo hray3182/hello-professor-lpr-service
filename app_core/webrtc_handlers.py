@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 from aiortc.contrib.media import MediaStreamError
 
 # Import the core_setup module itself
@@ -33,7 +33,18 @@ async def handle_offer_logic(params: dict, stream_type: str):
     core_setup.logger.info(f"Ensured no prior connection for stream_type '{stream_type}'.")
 
     offer_desc = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
-    pc = RTCPeerConnection()
+    
+    ice_servers = [
+        RTCIceServer(urls='stun:stun.l.google.com:19302')
+        # Consider adding a TURN server here if STUN is not enough
+        # RTCIceServer(
+        #     urls='turn:your-turn-server.com:3478',
+        #     username='your_username',
+        #     credential='your_password'
+        # )
+    ]
+    configuration = RTCConfiguration(iceServers=ice_servers)
+    pc = RTCPeerConnection(configuration=configuration)
     # Access streams_data via core_setup module
     core_setup.streams_data[stream_type] = {"pc": pc, "latest_frame": None, "video_track": None}
     core_setup.logger.info(f"New PeerConnection created for stream_type '{stream_type}'.")
