@@ -7,6 +7,8 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 from aiortc.contrib.media import MediaStreamError
+import aiohttp
+import io
 
 # Import the core_setup module itself
 from . import core_setup
@@ -14,11 +16,193 @@ from . import core_setup
 from .config import (
     DEBUG_SAVE_OCR_IMAGES, DEBUG_IMG_DIR, PROCESSED_WARPED_COLOR_PLATES_DIR,
     YOLO_CONF_FOR_OCR, OCR_FIXED_WIDTH, OCR_FIXED_HEIGHT, LP_FORMAT_REGEX,
-    CONFIDENCE_THRESHOLD
+    CONFIDENCE_THRESHOLD, EXTERNAL_API_BASE_URL
 )
 # Import close_connection specifically, assuming connection_manager also uses core_setup globals carefully or has them passed.
 # For now, close_connection is modified to accept streams_data and logger, which handle_offer_logic will pass from core_setup.
 from .utils.connection_manager import close_connection 
+
+async def process_yolo_detection(img_np, stream_type: str):
+    core_setup.logger.info(f"Performing YOLO prediction for '{stream_type}'...")
+    results_yolo = core_setup.yolo_model.predict(img_np, conf=YOLO_CONF_FOR_OCR, device=core_setup.device, verbose=False)
+    core_setup.logger.info(f"YOLO prediction done for '{stream_type}'.")
+
+    if results_yolo and results_yolo[0].masks is not None and len(results_yolo[0].masks.xy) > 0:
+        masks_polygons = results_yolo[0].masks.xy
+        confs = results_yolo[0].boxes.conf.cpu().numpy()
+        best_idx = np.argmax(confs)
+        yolo_confidence = float(confs[best_idx])
+        polygon = masks_polygons[best_idx].astype(np.int32)
+        core_setup.logger.info(f"Highest YOLO confidence for '{stream_type}': {yolo_confidence:.4f} for a mask.")
+        return yolo_confidence, polygon, results_yolo # Return results_yolo for other potential uses if any
+    else:
+        core_setup.logger.info(f"No objects (masks) detected by YOLO model for '{stream_type}'.")
+        return 0.0, None, None
+
+def preprocess_plate_image(img_np, polygon, frame_height, frame_width, stream_type: str, ts_debug: str = None):
+    core_setup.logger.info(f"Using simple bounding box crop from YOLO mask for '{stream_type}'.")
+    
+    mask_for_crop = np.zeros((frame_height, frame_width), dtype=np.uint8)
+    cv2.fillPoly(mask_for_crop, [polygon], 255)
+    if DEBUG_SAVE_OCR_IMAGES and ts_debug: 
+        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01a_simple_crop_mask.png"), mask_for_crop)
+
+    segmented_plate_for_crop = cv2.bitwise_and(img_np, img_np, mask=mask_for_crop)
+    if DEBUG_SAVE_OCR_IMAGES and ts_debug: 
+            cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01b_simple_segmented_for_crop.png"), segmented_plate_for_crop)
+    
+    x_poly, y_poly, w_poly, h_poly = cv2.boundingRect(polygon)
+    cropped_color_plate = None
+    if w_poly > 0 and h_poly > 0:
+        cropped_color_plate = segmented_plate_for_crop[y_poly:y_poly+h_poly, x_poly:x_poly+w_poly]
+        core_setup.logger.info(f"Simple bounding box crop for '{stream_type}'. Dimensions: w={w_poly}, h={h_poly}")
+        if DEBUG_SAVE_OCR_IMAGES and ts_debug and cropped_color_plate.size > 0:
+                cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01c_simple_color_cropped.png"), cropped_color_plate)
+    else:
+        core_setup.logger.warning(f"Simple bounding box crop for '{stream_type}' has zero width or height.")
+        return None, None # Return None if cropping failed
+
+    if cropped_color_plate is None or cropped_color_plate.size == 0:
+        core_setup.logger.warning(f"Cropped plate area for OCR is empty for '{stream_type}'.")
+        return None, None # Return None if cropped plate is empty
+
+    core_setup.logger.info(f"Cropped color plate for OCR for '{stream_type}' shape: {cropped_color_plate.shape}")
+    unconditional_ts_color = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + f"_{stream_type}"
+    color_plate_save_path = os.path.join(PROCESSED_WARPED_COLOR_PLATES_DIR, f"color_lp_{unconditional_ts_color}.png")
+    cv2.imwrite(color_plate_save_path, cropped_color_plate)
+    core_setup.logger.info(f"Saved original color cropped plate for '{stream_type}' to {color_plate_save_path}")
+
+    core_setup.logger.info(f"Preprocessing image for OCR for '{stream_type}': Grayscale -> CLAHE -> Resize -> Binarize.")
+    gray_plate = cv2.cvtColor(cropped_color_plate, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+    enhanced_gray_plate = clahe.apply(gray_plate)
+    resized_enhanced_gray_plate = cv2.resize(enhanced_gray_plate, (OCR_FIXED_WIDTH, OCR_FIXED_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
+    _, binarized_plate = cv2.threshold(resized_enhanced_gray_plate, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    if DEBUG_SAVE_OCR_IMAGES and ts_debug: 
+        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01_cropped_color.png"), cropped_color_plate)
+        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_02_gray.png"), gray_plate)
+        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_03_clahe_enhanced_gray.png"), enhanced_gray_plate)
+        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_04_resized_enhanced_gray.png"), resized_enhanced_gray_plate)
+        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_05_binarized_fixed_size.png"), binarized_plate)
+        core_setup.logger.info(f"Saved intermediate OCR preprocessing images to debug dir for '{stream_type}'.")
+        debug_final_ocr_input_path = os.path.join(DEBUG_IMG_DIR, f"_99_final_input_for_ocr_{stream_type}.png") 
+        cv2.imwrite(debug_final_ocr_input_path, binarized_plate) 
+        core_setup.logger.info(f"Updated final input for OCR for '{stream_type}': {debug_final_ocr_input_path}")
+    
+    return cropped_color_plate, binarized_plate # Return both color and binarized for potential use
+
+def perform_ocr_and_validate(binarized_plate_for_ocr, stream_type: str):
+    core_setup.logger.info(f"Performing EasyOCR for '{stream_type}'...")
+    ocr_text = "N/A"
+    raw_ocr_text_for_response = "N/A"
+    format_valid = False
+    ocr_message = ""
+
+    try:
+        ocr_results_easyocr = core_setup.easyocr_reader_instance.readtext(binarized_plate_for_ocr, detail=1, paragraph=False)
+        core_setup.logger.info(f"EasyOCR raw results for '{stream_type}': {ocr_results_easyocr}")
+        detected_texts = []
+        if ocr_results_easyocr:
+            for (bbox, text, prob) in ocr_results_easyocr:
+                detected_texts.append((text, prob))
+        
+        if detected_texts:
+            detected_texts.sort(key=lambda x: x[1], reverse=True)
+            raw_ocr_text_for_response = detected_texts[0][0]
+            ocr_confidence_easyocr = detected_texts[0][1]
+            ocr_text = "".join(c for c in raw_ocr_text_for_response.strip().upper().replace(" ", "") if c.isalnum() or c == '-')
+            core_setup.logger.info(f"EasyOCR Raw ('{stream_type}'): '{raw_ocr_text_for_response}', Cleaned: '{ocr_text}', Conf: {ocr_confidence_easyocr:.4f}")
+            if re.match(LP_FORMAT_REGEX, ocr_text):
+                format_valid = True
+                ocr_message = f"EasyOCR text ('{stream_type}') '{ocr_text}' matches format."
+                core_setup.logger.info(ocr_message)
+            else:
+                ocr_message = f"EasyOCR text ('{stream_type}') '{ocr_text}' (raw: '{raw_ocr_text_for_response}') does NOT match format."
+                core_setup.logger.info(ocr_message)
+        else:
+            raw_ocr_text_for_response = "NO_TEXT_DETECTED_EASYOCR"
+            ocr_text = "NO_TEXT_DETECTED_EASYOCR"
+            ocr_message = f"EasyOCR detected no text on the plate for '{stream_type}'."
+            core_setup.logger.info(ocr_message)
+    except Exception as ocr_e_easyocr:
+        error_type = type(ocr_e_easyocr).__name__
+        error_msg = str(ocr_e_easyocr)
+        ocr_message = f"EasyOCR processing error for '{stream_type}': {error_type} - {error_msg}"
+        core_setup.logger.error(ocr_message, exc_info=True)
+        ocr_text = "EASYOCR_ERROR"
+        raw_ocr_text_for_response = "EASYOCR_ERROR"
+        format_valid = False
+
+    return ocr_text, raw_ocr_text_for_response, format_valid, ocr_message
+
+async def call_external_parking_api(stream_type: str, license_plate: str, image_to_send_np):
+    api_call_status_message = ""
+    api_call_successful = False
+
+    is_success, im_buf_arr = cv2.imencode(".jpg", image_to_send_np)
+    if not is_success:
+        log_msg = f"Failed to encode image to JPG for external API call for '{stream_type}'."
+        core_setup.logger.error(log_msg)
+        return False, log_msg
+
+    byte_im = io.BytesIO(im_buf_arr)
+    byte_im.name = f"{stream_type}_{license_plate}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+
+    form_data = aiohttp.FormData()
+    form_data.add_field('licensePlate', license_plate)
+    form_data.add_field('image', byte_im, filename=byte_im.name, content_type='image/jpeg')
+    
+    api_url = f"{EXTERNAL_API_BASE_URL}/api/v1/parking-records/{stream_type}"
+    core_setup.logger.info(f"Calling external API: POST {api_url} with plate: {license_plate}")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, data=form_data) as response:
+                response_text = await response.text()
+                if response.status >= 200 and response.status < 300:
+                    api_call_successful = True
+                    api_call_status_message = f"External API call successful for '{stream_type}' (status: {response.status}): {response_text}"
+                    core_setup.logger.info(api_call_status_message)
+                else:
+                    api_call_status_message = f"External API call failed for '{stream_type}' (status: {response.status}): {response_text}"
+                    core_setup.logger.error(api_call_status_message)
+    except aiohttp.ClientError as e_api:
+        api_call_status_message = f"External API client error for '{stream_type}': {e_api}"
+        core_setup.logger.error(api_call_status_message)
+    except Exception as e_generic_api:
+        api_call_status_message = f"Generic error during external API call for '{stream_type}': {e_generic_api}"
+        core_setup.logger.error(api_call_status_message, exc_info=True)
+    
+    return api_call_successful, api_call_status_message
+
+async def call_exit_check_api(license_plate: str):
+    api_call_status_message = ""
+    api_call_successful = False
+    
+    api_url = f"{EXTERNAL_API_BASE_URL}/api/v1/parking-records/exit"
+    payload = {"licensePlate": license_plate}
+    core_setup.logger.info(f"Calling Exit Check API: POST {api_url} with JSON payload: {payload}")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, json=payload, headers={"Content-Type": "application/json"}) as response:
+                response_text = await response.text()
+                if response.status >= 200 and response.status < 300:
+                    api_call_successful = True
+                    api_call_status_message = f"Exit Check API call successful (status: {response.status}): {response_text}"
+                    core_setup.logger.info(api_call_status_message)
+                else:
+                    api_call_status_message = f"Exit Check API call failed (status: {response.status}): {response_text}"
+                    core_setup.logger.error(api_call_status_message)
+    except aiohttp.ClientError as e_api:
+        api_call_status_message = f"Exit Check API client error: {e_api}"
+        core_setup.logger.error(api_call_status_message)
+    except Exception as e_generic_api:
+        api_call_status_message = f"Generic error during Exit Check API call: {e_generic_api}"
+        core_setup.logger.error(api_call_status_message, exc_info=True)
+    
+    return api_call_successful, api_call_status_message
 
 async def handle_offer_logic(params: dict, stream_type: str):
     offer_sdp = params.get("sdp")
@@ -120,7 +304,6 @@ async def handle_offer_logic(params: dict, stream_type: str):
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
 async def handle_capture_logic(stream_type: str):
-    # Access models, logger, streams_data, device via core_setup module
     if core_setup.yolo_model is None:
         raise HTTPException(status_code=500, detail="YOLO Model not loaded (checked in handler)")
     if core_setup.easyocr_reader_instance is None:
@@ -138,11 +321,15 @@ async def handle_capture_logic(stream_type: str):
         raise HTTPException(status_code=404, detail=f"No active video stream or frame found for stream_type '{stream_type}'.")
     
     core_setup.logger.info(f"--- /{stream_type}/capture endpoint called --- (Core Handler)")
+    ts_debug = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + f"_{stream_type}" if DEBUG_SAVE_OCR_IMAGES else None
 
+    ocr_text = "N/A"
+    yolo_confidence = 0.0
+    format_valid = False
+    best_status = "error"
+    message = f"Processing started for '{stream_type}'."
     raw_ocr_text_for_response = "N/A"
-    ts_debug = None
-    if DEBUG_SAVE_OCR_IMAGES:
-        ts_debug = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + f"_{stream_type}"
+    cropped_color_plate_for_api = None # To store the image for API call
 
     try:
         core_setup.logger.info(f"Starting try block in capture for stream '{stream_type}'")
@@ -153,131 +340,76 @@ async def handle_capture_logic(stream_type: str):
         if DEBUG_SAVE_OCR_IMAGES and ts_debug:
             cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_00_original_frame.png"), img_np)
 
-        core_setup.logger.info(f"Performing YOLO prediction for '{stream_type}'...")
-        results_yolo = core_setup.yolo_model.predict(img_np, conf=YOLO_CONF_FOR_OCR, device=core_setup.device, verbose=False)
-        core_setup.logger.info(f"YOLO prediction done for '{stream_type}'.")
+        yolo_confidence, polygon, _ = await process_yolo_detection(img_np, stream_type)
 
-        ocr_text = "N/A"
-        yolo_confidence = 0.0
-        format_valid = False
-        best_status = "error"
-        message = f"Initial error for '{stream_type}': No license plate by YOLO with sufficient confidence."
-
-        if results_yolo and results_yolo[0].masks is not None and len(results_yolo[0].masks.xy) > 0:
-            masks_polygons = results_yolo[0].masks.xy
-            confs = results_yolo[0].boxes.conf.cpu().numpy()
-            best_idx = np.argmax(confs)
-            yolo_confidence = float(confs[best_idx])
-            polygon = masks_polygons[best_idx].astype(np.int32)
-            core_setup.logger.info(f"Highest YOLO confidence for '{stream_type}': {yolo_confidence:.4f} for a mask.")
-
-            if yolo_confidence >= YOLO_CONF_FOR_OCR:
-                core_setup.logger.info(f"YOLO confidence above threshold for '{stream_type}', proceeding with plate processing.")
-                cropped_color_plate = None 
-                core_setup.logger.info(f"Using simple bounding box crop from YOLO mask for '{stream_type}'.")
-                
-                mask_for_crop = np.zeros((frame_height, frame_width), dtype=np.uint8)
-                cv2.fillPoly(mask_for_crop, [polygon], 255)
-                if DEBUG_SAVE_OCR_IMAGES and ts_debug: 
-                    cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01a_simple_crop_mask.png"), mask_for_crop)
-
-                segmented_plate_for_crop = cv2.bitwise_and(img_np, img_np, mask=mask_for_crop)
-                if DEBUG_SAVE_OCR_IMAGES and ts_debug: 
-                     cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01b_simple_segmented_for_crop.png"), segmented_plate_for_crop)
-                
-                x_poly, y_poly, w_poly, h_poly = cv2.boundingRect(polygon)
-                
-                if w_poly > 0 and h_poly > 0:
-                    cropped_color_plate = segmented_plate_for_crop[y_poly:y_poly+h_poly, x_poly:x_poly+w_poly]
-                    core_setup.logger.info(f"Simple bounding box crop for '{stream_type}'. Dimensions: w={w_poly}, h={h_poly}")
-                    if DEBUG_SAVE_OCR_IMAGES and ts_debug and cropped_color_plate.size > 0:
-                         cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01c_simple_color_cropped.png"), cropped_color_plate)
-                else:
-                    core_setup.logger.warning(f"Simple bounding box crop for '{stream_type}' has zero width or height.")
-                
-                if cropped_color_plate is None or cropped_color_plate.size == 0:
-                    message = f"Cropped plate area for OCR is empty for '{stream_type}'."
-                    core_setup.logger.warning(message)
-                else:
-                    core_setup.logger.info(f"Cropped color plate for OCR for '{stream_type}' shape: {cropped_color_plate.shape}")
-                    unconditional_ts_color = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + f"_{stream_type}"
-                    color_plate_save_path = os.path.join(PROCESSED_WARPED_COLOR_PLATES_DIR, f"color_lp_{unconditional_ts_color}.png")
-                    cv2.imwrite(color_plate_save_path, cropped_color_plate)
-                    core_setup.logger.info(f"Saved original color cropped plate for '{stream_type}' to {color_plate_save_path}")
-
-                    core_setup.logger.info(f"Preprocessing image for OCR for '{stream_type}': Grayscale -> CLAHE -> Resize -> Binarize.")
-                    gray_plate = cv2.cvtColor(cropped_color_plate, cv2.COLOR_BGR2GRAY)
-                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-                    enhanced_gray_plate = clahe.apply(gray_plate)
-                    resized_enhanced_gray_plate = cv2.resize(enhanced_gray_plate, (OCR_FIXED_WIDTH, OCR_FIXED_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
-                    _, binarized_plate = cv2.threshold(resized_enhanced_gray_plate, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-                    if DEBUG_SAVE_OCR_IMAGES and ts_debug: 
-                        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_01_cropped_color.png"), cropped_color_plate)
-                        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_02_gray.png"), gray_plate)
-                        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_03_clahe_enhanced_gray.png"), enhanced_gray_plate)
-                        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_04_resized_enhanced_gray.png"), resized_enhanced_gray_plate)
-                        cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_05_binarized_fixed_size.png"), binarized_plate)
-                        core_setup.logger.info(f"Saved intermediate OCR preprocessing images to debug dir for '{stream_type}'.")
-                        debug_final_ocr_input_path = os.path.join(DEBUG_IMG_DIR, f"_99_final_input_for_ocr_{stream_type}.png") 
-                        cv2.imwrite(debug_final_ocr_input_path, binarized_plate) 
-                        core_setup.logger.info(f"Updated final input for OCR for '{stream_type}': {debug_final_ocr_input_path}")
-
-                    core_setup.logger.info(f"Performing EasyOCR for '{stream_type}'...")
-                    try:
-                        ocr_results_easyocr = core_setup.easyocr_reader_instance.readtext(binarized_plate, detail=1, paragraph=False)
-                        core_setup.logger.info(f"EasyOCR raw results for '{stream_type}': {ocr_results_easyocr}")
-                        detected_texts = []
-                        if ocr_results_easyocr:
-                            for (bbox, text, prob) in ocr_results_easyocr:
-                                detected_texts.append((text, prob))
-                        if detected_texts:
-                            detected_texts.sort(key=lambda x: x[1], reverse=True)
-                            raw_ocr_text_for_response = detected_texts[0][0]
-                            ocr_confidence_easyocr = detected_texts[0][1]
-                            ocr_text = "".join(c for c in raw_ocr_text_for_response.strip().upper().replace(" ", "") if c.isalnum() or c == '-')
-                            core_setup.logger.info(f"EasyOCR Raw ('{stream_type}'): '{raw_ocr_text_for_response}', Cleaned: '{ocr_text}', Conf: {ocr_confidence_easyocr:.4f}")
-                            if re.match(LP_FORMAT_REGEX, ocr_text):
-                                format_valid = True
-                                core_setup.logger.info(f"EasyOCR text ('{stream_type}') '{ocr_text}' matches format.")
-                            else:
-                                core_setup.logger.info(f"EasyOCR text ('{stream_type}') '{ocr_text}' does NOT match format.")
-                                message = f"EasyOCR text ('{stream_type}') '{ocr_text}' (raw: '{raw_ocr_text_for_response}') no format match."
-                        else:
-                            raw_ocr_text_for_response = "NO_TEXT_DETECTED_EASYOCR"
-                            ocr_text = "NO_TEXT_DETECTED_EASYOCR"
-                            message = f"EasyOCR detected no text on the plate for '{stream_type}'."
-                            core_setup.logger.info(message)
-                    except Exception as ocr_e_easyocr:
-                        error_type = type(ocr_e_easyocr).__name__
-                        error_msg = str(ocr_e_easyocr)
-                        core_setup.logger.error(f"Error during EasyOCR processing for '{stream_type}' ({error_type}): {error_msg}", exc_info=True)
-                        message = f"EasyOCR processing error for '{stream_type}': {error_type} - {error_msg}"
-                        ocr_text = "EASYOCR_ERROR"
-            else:
-                message = f"YOLO confidence ({yolo_confidence:.2f}) too low for OCR on '{stream_type}'."
-                core_setup.logger.info(message)
+        if polygon is None or yolo_confidence < YOLO_CONF_FOR_OCR:
+            message = f"YOLO: No plate detected or confidence too low ({yolo_confidence:.2f}) for '{stream_type}'."
+            core_setup.logger.info(message)
         else:
-            if not (results_yolo and results_yolo[0].masks is not None and len(results_yolo[0].masks.xy) > 0):
-                 message = f"No objects (masks) detected by YOLO model for '{stream_type}'."
-            core_setup.logger.info(f"YOLO processing outcome for '{stream_type}': {message}")
+            message = f"YOLO: Plate detected (conf: {yolo_confidence:.2f}) for '{stream_type}'. Processing image."
+            core_setup.logger.info(message)
+            
+            cropped_color_plate_for_api, binarized_plate = preprocess_plate_image(img_np, polygon, frame_height, frame_width, stream_type, ts_debug)
 
-        core_setup.logger.info(f"Message before final status check for '{stream_type}': {message}")
-        if yolo_confidence >= CONFIDENCE_THRESHOLD and format_valid:
-            best_status = "ok"
-            if not message.startswith("EasyOCR text") and not message.startswith("License plate detected:"):
-                 message = f"License plate detected for '{stream_type}': {ocr_text}"
-        elif yolo_confidence >= YOLO_CONF_FOR_OCR and ocr_text not in ["N/A", "EASYOCR_ERROR", "NO_TEXT_DETECTED_EASYOCR"] and not format_valid:
-             if not message.startswith("EasyOCR text"):
-                message = f"Detected, but OCR invalid for '{stream_type}'. YOLO:{yolo_confidence:.2f}, OCR:'{ocr_text}'(Raw:'{raw_ocr_text_for_response}')"
+            if cropped_color_plate_for_api is None or binarized_plate is None:
+                message = f"Image preprocessing failed for '{stream_type}' (e.g., empty crop)."
+                core_setup.logger.warning(message)
+            else:
+                message = f"Preprocessing successful for '{stream_type}'. Performing OCR."
+                core_setup.logger.info(message)
+                ocr_text, raw_ocr_text_for_response, format_valid, ocr_message = perform_ocr_and_validate(binarized_plate, stream_type)
+                message = ocr_message 
+
+                if format_valid and yolo_confidence >= CONFIDENCE_THRESHOLD:
+                    if stream_type == "exit":
+                        core_setup.logger.info(f"Plate '{ocr_text}' recognized for 'exit'. Calling Exit Check API.")
+                        api_success, api_msg = await call_exit_check_api(ocr_text)
+                        if api_success:
+                            best_status = "ok"
+                            message = f"Plate '{ocr_text}' (conf: {yolo_confidence:.2f}) validated for 'exit' by API."
+                            core_setup.logger.info(message)
+                        else:
+                            best_status = "error_exit_api_check"
+                            message = f"Plate '{ocr_text}' (conf: {yolo_confidence:.2f}) detected for 'exit', but API check failed: {api_msg}"
+                            core_setup.logger.error(message)
+                    
+                    elif stream_type == "entry": # Keep existing entry logic if it involves API call with image
+                        best_status = "ok"
+                        message = f"Plate '{ocr_text}' (conf: {yolo_confidence:.2f}) detected for '{stream_type}'."
+                        core_setup.logger.info(message) # Log primary success for entry
+
+                        # Example: If 'entry' still needs to call the old API with an image:
+                        # core_setup.logger.info(f"Condition met for API call (stream_type: {stream_type}). Preparing to call external API.")
+                        # image_for_api = cropped_color_plate_for_api if cropped_color_plate_for_api is not None and cropped_color_plate_for_api.size > 0 else img_np
+                        # entry_api_success, entry_api_msg = await call_external_parking_api(stream_type, ocr_text, image_for_api)
+                        # if not entry_api_success:
+                        #     best_status = "error_api_call" # Or a more specific status
+                        #     # message += f" | Entry API call failed: {entry_api_msg}" # Optional: append to message
+                        # else:
+                        #     # message += f" | Entry API call successful." # Optional: append to message
+
+                    else: # For other stream types, if any
+                        best_status = "ok"
+                        message = f"Plate '{ocr_text}' (conf: {yolo_confidence:.2f}) detected for '{stream_type}'."
+                        core_setup.logger.info(message)
+
+                elif format_valid: 
+                    best_status = "ocr_ok_low_confidence"
+                    message = f"Plate '{ocr_text}' format valid, but overall confidence ({yolo_confidence:.2f}) may be low for '{stream_type}'."
+                    core_setup.logger.warning(message)
+                else: 
+                    best_status = "error_ocr"
+                    core_setup.logger.warning(f"OCR failed or format invalid for '{stream_type}'. Message: {message}")
         
-        core_setup.logger.info(f"Final status for '{stream_type}': {best_status}, Final message: {message}")
+        core_setup.logger.info(f"Capture logic for '{stream_type}' completed. Status: {best_status}, Message: {message}, Plate: {ocr_text}, YOLO Conf: {yolo_confidence:.4f}, Format Valid: {format_valid}, Raw OCR: {raw_ocr_text_for_response}")
+
         return JSONResponse(content={
             "status": best_status, "message": message,
             "yolo_confidence": round(yolo_confidence, 4),
             "ocr_text_raw": raw_ocr_text_for_response.strip() if isinstance(raw_ocr_text_for_response, str) else raw_ocr_text_for_response,
             "ocr_text_cleaned": ocr_text, "ocr_format_valid": format_valid,
-            "stream_type": stream_type 
+            "stream_type": stream_type,
+            "timestamp": datetime.now().isoformat()
         }, status_code=200)
 
     except Exception as e_capture:
