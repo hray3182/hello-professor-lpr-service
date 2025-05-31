@@ -112,7 +112,158 @@
             </footer>
         </div>
 
+        <!-- New Debug Log Section -->
+        <section id="debugLogWrapper" class="mt-6 w-full max-w-3xl mx-auto mb-8">
+            <div class="flex justify-between items-center mb-2">
+                <h3 class="text-xl font-semibold text-sky-300">Debug Log</h3>
+                <div class="flex space-x-2">
+                    <button id="copyLogButton" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1 px-3 rounded-lg text-sm">Copy Log</button>
+                    <button id="clearLogButton" class="bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-1 px-3 rounded-lg text-sm">Clear Log</button>
+                </div>
+            </div>
+            <div id="debugLogOutput" class="bg-gray-800 p-4 rounded-lg shadow-inner h-64 overflow-y-auto text-xs font-mono whitespace-pre-wrap break-all">
+                --- Debug log initialized ---<br>
+            </div>
+        </section>
+
         <script>
+            // --- Debug Log Utilities ---
+            const debugLogOutput = document.getElementById('debugLogOutput');
+            const clearLogButton = document.getElementById('clearLogButton');
+            const copyLogButton = document.getElementById('copyLogButton');
+            let logCounter = 0;
+
+            function formatLogMessage(args, type = 'log') {
+                logCounter++;
+                const now = new Date();
+                const timestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}.${String(now.getMilliseconds()).padStart(3, '0')}`;
+                let color = 'text-gray-300'; // Default for log
+                if (type === 'error') color = 'text-red-400';
+                else if (type === 'warn') color = 'text-yellow-400';
+                else if (type === 'info') color = 'text-sky-400';
+
+                const messageParts = Array.from(args).map(arg => {
+                    if (typeof arg === 'object') {
+                        try {
+                            return JSON.stringify(arg, (key, value) => 
+                                typeof value === 'bigint' ? value.toString() : value, 
+                            2);
+                        } catch (e) {
+                            return arg.toString() + ' (Unserializable Object)';
+                        }
+                    } else if (typeof arg === 'undefined') {
+                        return 'undefined';
+                    }
+                    return String(arg);
+                });
+                return `<span class="${color}">[<span class="text-purple-400">${logCounter}</span>][${timestamp}] ${messageParts.join(' ')}</span><br>`;
+            }
+
+            function logToPage(...args) {
+                if (debugLogOutput) {
+                    debugLogOutput.innerHTML += formatLogMessage(args, 'log');
+                    debugLogOutput.scrollTop = debugLogOutput.scrollHeight; // Auto-scroll
+                }
+            }
+
+            const originalConsoleLog = console.log;
+            console.log = function(...args) {
+                originalConsoleLog.apply(console, args);
+                logToPage.apply(null, ['LOG:', ...args]);
+            };
+
+            const originalConsoleError = console.error;
+            console.error = function(...args) {
+                originalConsoleError.apply(console, args);
+                logToPage.apply(null, ['ERROR:', ...args]);
+            };
+
+            const originalConsoleWarn = console.warn;
+            console.warn = function(...args) {
+                originalConsoleWarn.apply(console, args);
+                logToPage.apply(null, ['WARN:', ...args]);
+            };
+
+            const originalConsoleInfo = console.info;
+            console.info = function(...args) {
+                originalConsoleInfo.apply(console, args);
+                logToPage.apply(null, ['INFO:', ...args]);
+            };
+
+            if (clearLogButton) {
+                clearLogButton.addEventListener('click', () => {
+                    if (debugLogOutput) {
+                        debugLogOutput.innerHTML = '--- Log cleared ---<br>';
+                        logCounter = 0;
+                    }
+                });
+            }
+
+            if (copyLogButton) {
+                copyLogButton.addEventListener('click', () => {
+                    if (debugLogOutput && navigator.clipboard) {
+                        // Extract text content, attempting to preserve line breaks reasonably
+                        // by converting <br> to newlines and then stripping other HTML.
+                        const logHtml = debugLogOutput.innerHTML.replace(/<br\s*[/]?>/gi, '\n');
+                        const tempDiv = document.createElement('div');
+                        tempDiv.innerHTML = logHtml;
+                        const logText = tempDiv.textContent || tempDiv.innerText || "";
+                        
+                        navigator.clipboard.writeText(logText.trim()).then(() => {
+                            const originalText = copyLogButton.textContent;
+                            copyLogButton.textContent = 'Copied!';
+                            copyLogButton.disabled = true;
+                            setTimeout(() => {
+                                copyLogButton.textContent = originalText;
+                                copyLogButton.disabled = false;
+                            }, 1500);
+                        }).catch(err => {
+                            console.error('Failed to copy log to clipboard:', err);
+                            alert('Failed to copy log. See console for details.');
+                        });
+                    } else if (!navigator.clipboard) {
+                        console.error('Clipboard API not available.');
+                        alert('Clipboard API not available in this browser or context (e.g. HTTP).');
+                    }
+                });
+            }
+
+            // Initial log to test the system
+            console.log("Page logger initialized."); 
+
+            // --- Configuration ---
+            const CONFIG = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    // { urls: 'stun:stun2.l.google.com:19302' }, // Temporarily commented out
+                    // { urls: 'stun:stun3.l.google.com:19302' }, // Temporarily commented out
+                    // { urls: 'stun:stun4.l.google.com:19302' }, // Temporarily commented out
+                    // { urls: 'stun:stun01.sipphone.com' },      // Temporarily commented out
+                    // { urls: 'stun:stun.ekiga.net' },           // Temporarily commented out
+                    // { urls: 'stun:stun.fwdnet.net' },          // Temporarily commented out
+                    // { urls: 'stun:stun.ideasip.com' },       // Temporarily commented out
+                    // { urls: 'stun:stun.iptel.org' },         // Temporarily commented out
+                    // { urls: 'stun:stun.rixtelecom.se' },     // Temporarily commented out
+                    // { urls: 'stun:stun.schlund.de' },        // Temporarily commented out
+                    // { urls: 'stun:stunserver.org' },         // Temporarily commented out
+                    // { urls: 'stun:stun.softjoys.com' },      // Temporarily commented out
+                    // { urls: 'stun:stun.voiparound.com' },    // Temporarily commented out
+                    // { urls: 'stun:stun.voipbuster.com' },    // Temporarily commented out
+                    // { urls: 'stun:stun.voipstunt.com' },     // Temporarily commented out
+                    // { urls: 'stun:stun.voxgratia.org' },     // Temporarily commented out
+                    // { urls: 'stun:stun.xten.com' }            // Temporarily commented out
+                ],
+                videoConstraints: {
+                    audio: false,
+                    video: {
+                        facingMode: "environment",
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 }
+                    }
+                }
+            };
+
             // Global state for managing multiple streams
             const streams = {
                 entry: { 
@@ -154,6 +305,29 @@
             const ocrFormatValidSpan = document.getElementById('ocrFormatValid');
             const predictionMessageP = document.getElementById('predictionMessage');
 
+            // --- Helper Functions ---
+            async function handleApiRequest(url, options = {}, streamTypeForError = 'Generic') {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        throw new Error(`Server responded with ${response.status} for ${streamTypeForError} API call to ${url}: ${errorText}`);
+                    }
+                    // For GET requests that might return no content or for offer/answer that we only care about ok status for error check before .json()
+                    if (response.status === 204) return null; // No Content
+                    
+                    // Check content type before parsing as JSON, common for GET /capture, POST /offer
+                    const contentType = response.headers.get("content-type");
+                    if (contentType && contentType.includes("application/json")) {
+                        return await response.json();
+                    }
+                    return await response.text(); // Or handle as blob, etc., if other types are expected
+                } catch (error) {
+                    console.error(`API request error for ${streamTypeForError} to ${url}:`, error);
+                    throw error; // Re-throw to be caught by calling function
+                }
+            }
+
             function resetPredictionDisplay() {
                 predictionStatusDiv.textContent = "Status: Idle";
                 predictionStatusDiv.className = "text-xl min-h-[2.5em] flex items-center justify-center p-3 bg-gray-700/50 rounded-md mb-4 font-medium text-gray-200";
@@ -179,106 +353,125 @@
                 // Update classes based on overall state or specific stream state if needed
             }
 
+            async function requestUserMedia(constraints) {
+                try {
+                    return await navigator.mediaDevices.getUserMedia(constraints);
+                } catch (error) {
+                    console.error("Error acquiring user media:", error);
+                    throw error;
+                }
+            }
+
+            function createPeerConnection(streamType, iceServersConfig, localStreamForTracks) {
+                const pc = new RTCPeerConnection({ iceServers: iceServersConfig });
+                console.log(`RTCPeerConnection created for ${streamType}.`);
+
+                pc.onicecandidate = event => {
+                    if (event.candidate) {
+                        console.log(`ICE candidate for ${streamType}:`, event.candidate);
+                    } else {
+                        console.log(`End of ICE candidates for ${streamType}.`);
+                    }
+                };
+
+                pc.onicecandidateerror = event => {
+                    console.error(`ICE candidate error for ${streamType}:`, event);
+                };
+
+                pc.onicegatheringstatechange = () => {
+                    console.log(`ICE gathering state for ${streamType} changed to: ${pc.iceGatheringState}`);
+                };
+
+                pc.ontrack = event => {
+                    console.log(`Server track event for ${streamType} (not displayed):`, event.track.kind);
+                };
+
+                pc.onconnectionstatechange = () => { // Arrow function to ensure 'this' is not an issue, though not strictly needed here.
+                    const currentPC = streams[streamType] ? streams[streamType].pc : null;
+                    if (pc !== currentPC) {
+                        console.log(`Ignoring stale onconnectionstatechange event for ${streamType}`);
+                        return;
+                    }
+                    console.log(`PeerConnection state for ${streamType} changed to: ${pc.connectionState}`);
+                    if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
+                        updateStreamUI(streamType, true, `Status: ${streamType.toUpperCase()} Connected`);
+                        predictionStatusDiv.classList.remove('text-gray-200', 'bg-red-500/30', 'text-red-400');
+                        predictionStatusDiv.classList.add('text-green-300');
+                    } else {
+                        updateStreamUI(streamType, false);
+                        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+                            predictionStatusDiv.textContent = `Status: ${streamType.toUpperCase()} Disconnected`;
+                            predictionStatusDiv.classList.remove('text-green-300');
+                            predictionStatusDiv.classList.add('text-red-400', 'bg-red-500/30');
+                        }
+                    }
+                };
+
+                if (localStreamForTracks) {
+                    localStreamForTracks.getTracks().forEach(track => {
+                        pc.addTrack(track, localStreamForTracks);
+                    });
+                }
+                return pc;
+            }
+
+            async function performSignaling(streamType, pc) {
+                const offer = await pc.createOffer();
+                console.log(`Local Offer SDP for ${streamType}:`, JSON.stringify(offer, null, 2));
+                await pc.setLocalDescription(offer);
+
+                const sdpPayload = {
+                    sdp: pc.localDescription.sdp,
+                    type: pc.localDescription.type
+                };
+
+                const answerData = await handleApiRequest(
+                    `/${streamType}/offer`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(sdpPayload)
+                    },
+                    streamType
+                );
+
+                if (!answerData || (typeof answerData === 'object' && answerData.error)) { 
+                    throw new Error(`Server error in answer for ${streamType}: ${answerData && answerData.error ? answerData.error : 'No valid answer received'}`);
+                }
+                if (typeof answerData !== 'object' || !answerData.sdp || !answerData.type) {
+                     throw new Error(`Invalid answer format received for ${streamType}. Expected SDP and type.`);
+                }
+
+                console.log(`Remote Answer SDP for ${streamType}:`, JSON.stringify(answerData, null, 2));
+                await pc.setRemoteDescription(new RTCSessionDescription({ sdp: answerData.sdp, type: answerData.type }));
+                console.log(`Remote description set for ${streamType}. WebRTC connection should be established.`);
+            }
+
             async function start(streamType) {
                 if (!streams[streamType]) {
                     console.error("Invalid streamType provided to start():", streamType);
                     return;
                 }
 
-                // If this specific stream is already active, stop it first before restarting
                 if (streams[streamType].pc) {
                     console.log(`Stream ${streamType} is already active. Stopping it before restarting.`);
                     await stopStream(streamType);
                 }
                 
                 console.log(`Attempting to start camera and WebRTC connection for type: ${streamType}...`);
-                resetPredictionDisplay(); // Reset global prediction display
+                resetPredictionDisplay();
                 streams[streamType].captureButton.disabled = true;
 
                 try {
-                    streams[streamType].localStream = await navigator.mediaDevices.getUserMedia({
-                        audio: false,
-                        video: {
-                            facingMode: "environment",
-                            width: { ideal: 1920 },
-                            height: { ideal: 1080 }
-                        }
-                    });
-                    streams[streamType].videoElement.srcObject = streams[streamType].localStream;
+                    const localStream = await requestUserMedia(CONFIG.videoConstraints);
+                    streams[streamType].localStream = localStream;
+                    streams[streamType].videoElement.srcObject = localStream;
                     console.log(`Local camera stream acquired for ${streamType}.`);
 
-                    const iceServers = [
-                        { urls: 'stun:stun.l.google.com:19302' }
-                        // Consider adding a TURN server here if STUN is not enough
-                        // {
-                        //   urls: 'turn:your-turn-server.com:3478',
-                        //   username: 'your_username',
-                        //   credential: 'your_password'
-                        // }
-                    ];
-                    const pc = new RTCPeerConnection({ iceServers: iceServers });
+                    const pc = createPeerConnection(streamType, CONFIG.iceServers, localStream);
                     streams[streamType].pc = pc;
-                    console.log(`RTCPeerConnection created for ${streamType}.`);
-                    
-                    pc.onicecandidate = event => { /* Optional: ICE candidate handling for ${streamType} */ };
-                    
-                    pc.ontrack = event => {
-                        console.log(`Server track event for ${streamType} (not displayed):`, event.track.kind);
-                        // If we were to display remote stream, it would be streams[streamType].remoteVideoElement.srcObject = event.streams[0];
-                    };
 
-                    pc.onconnectionstatechange = event => {
-                        const currentPC = streams[streamType].pc;
-                        if (pc !== currentPC) { // Stale event from an old PC instance for this streamType
-                            console.log(`Ignoring stale onconnectionstatechange event for ${streamType}`);
-                            return;
-                        }
-                        console.log(`PeerConnection state for ${streamType} changed to: ${pc.connectionState}`);
-                        if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
-                            updateStreamUI(streamType, true, `Status: ${streamType.toUpperCase()} Connected`);
-                            predictionStatusDiv.classList.remove('text-gray-200', 'bg-red-500/30', 'text-red-400');
-                            predictionStatusDiv.classList.add('text-green-300');
-                        } else {
-                            // If not connected/completed, disable capture. It might be connecting, failed, or disconnected.
-                            updateStreamUI(streamType, false);
-                            if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
-                                 predictionStatusDiv.textContent = `Status: ${streamType.toUpperCase()} Disconnected`;
-                                 predictionStatusDiv.classList.remove('text-green-300');
-                                 predictionStatusDiv.classList.add('text-red-400', 'bg-red-500/30');
-                                 // Clean up resources for this specific stream if it truly closed/failed unexpectedly
-                                 // stopStream(streamType); // Be careful with auto-stopping, might conflict with user actions
-                            }
-                        }
-                    };
-
-                    streams[streamType].localStream.getTracks().forEach(track => {
-                        pc.addTrack(track, streams[streamType].localStream);
-                    });
-
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    
-                    const response = await fetch(`/${streamType}/offer`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            sdp: pc.localDescription.sdp, 
-                            type: pc.localDescription.type
-                        })
-                    }); 
-                    
-                    if (!response.ok) { 
-                        const errorText = await response.text();
-                        throw new Error(`Server responded with ${response.status} for ${streamType}: ${errorText}`);
-                     }
-                    
-                    const answerData = await response.json(); 
-                    if (answerData.error) {
-                        throw new Error(`Server error in answer for ${streamType}: ${answerData.error}`);
-                    }
-
-                    await pc.setRemoteDescription(new RTCSessionDescription({sdp: answerData.sdp, type: answerData.type}));
-                    console.log(`Remote description set for ${streamType}. WebRTC connection should be established.`);
+                    await performSignaling(streamType, pc);
 
                 } catch (e) {
                     console.error(`Error during WebRTC start sequence for ${streamType}: `, e);
@@ -306,8 +499,12 @@
                 predictionMessageP.textContent = `Sending image from ${streamType} to server...`;
 
                 try {
-                    const response = await fetch(`/${streamType}/capture`);
-                    const result = await response.json();
+                    // const response = await fetch(`/${streamType}/capture`);
+                    // const result = await response.json();
+                    const result = await handleApiRequest(`/${streamType}/capture`, {}, streamType);
+                    
+                    if (!result) throw new Error("No result from capture API");
+
                     console.log(`Prediction result for ${streamType}:`, result);
 
                     predictionMessageP.textContent = result.message || `Processing complete for ${streamType}.`;

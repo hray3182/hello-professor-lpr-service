@@ -33,9 +33,28 @@ async def handle_offer_logic(params: dict, stream_type: str):
     core_setup.logger.info(f"Ensured no prior connection for stream_type '{stream_type}'.")
 
     offer_desc = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
+    core_setup.logger.info(f"Received Offer SDP for {stream_type}:\n{offer_sdp}")
     
     ice_servers = [
-        RTCIceServer(urls='stun:stun.l.google.com:19302')
+        RTCIceServer(urls='stun:stun.l.google.com:19302'),
+        RTCIceServer(urls='stun:stun1.l.google.com:19302'),
+        RTCIceServer(urls='stun:stun2.l.google.com:19302'),
+        RTCIceServer(urls='stun:stun3.l.google.com:19302'),
+        RTCIceServer(urls='stun:stun4.l.google.com:19302'),
+        RTCIceServer(urls='stun:stun01.sipphone.com'),
+        RTCIceServer(urls='stun:stun.ekiga.net'),
+        RTCIceServer(urls='stun:stun.fwdnet.net'),
+        RTCIceServer(urls='stun:stun.ideasip.com'),
+        RTCIceServer(urls='stun:stun.iptel.org'),
+        RTCIceServer(urls='stun:stun.rixtelecom.se'),
+        RTCIceServer(urls='stun:stun.schlund.de'),
+        RTCIceServer(urls='stun:stunserver.org'),
+        RTCIceServer(urls='stun:stun.softjoys.com'),
+        RTCIceServer(urls='stun:stun.voiparound.com'),
+        RTCIceServer(urls='stun:stun.voipbuster.com'),
+        RTCIceServer(urls='stun:stun.voipstunt.com'),
+        RTCIceServer(urls='stun:stun.voxgratia.org'),
+        RTCIceServer(urls='stun:stun.xten.com')
         # Consider adding a TURN server here if STUN is not enough
         # RTCIceServer(
         #     urls='turn:your-turn-server.com:3478',
@@ -96,6 +115,7 @@ async def handle_offer_logic(params: dict, stream_type: str):
     
     await pc.setRemoteDescription(offer_desc)
     answer = await pc.createAnswer()
+    core_setup.logger.info(f"Created Answer SDP for {stream_type}:\n{answer.sdp}")
     await pc.setLocalDescription(answer)
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
