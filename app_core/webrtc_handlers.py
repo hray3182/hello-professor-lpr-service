@@ -329,13 +329,20 @@ async def handle_capture_logic(stream_type: str):
     best_status = "error"
     message = f"Processing started for '{stream_type}'."
     raw_ocr_text_for_response = "N/A"
-    cropped_color_plate_for_api = None # To store the image for API call
+    # Store original full car image for entry API call
+    original_full_car_image = None 
 
     try:
         core_setup.logger.info(f"Starting try block in capture for stream '{stream_type}'")
         img_np = latest_frame.to_ndarray(format="bgr24")
         frame_height, frame_width = img_np.shape[:2]
         core_setup.logger.info(f"Frame received for '{stream_type}': {{frame_width}}x{{frame_height}}")
+        
+        # Store original image for entry API call
+        if stream_type == "entry":
+            original_full_car_image = img_np.copy()
+            if DEBUG_SAVE_OCR_IMAGES and ts_debug:
+                cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_00_original_full_car.png"), original_full_car_image)
         
         if DEBUG_SAVE_OCR_IMAGES and ts_debug:
             cv2.imwrite(os.path.join(DEBUG_IMG_DIR, f"{ts_debug}_00_original_frame.png"), img_np)
@@ -373,21 +380,22 @@ async def handle_capture_logic(stream_type: str):
                             message = f"Plate '{ocr_text}' (conf: {yolo_confidence:.2f}) detected for 'exit', but API check failed: {api_msg}"
                             core_setup.logger.error(message)
                     
-                    elif stream_type == "entry": # Keep existing entry logic if it involves API call with image
+                    elif stream_type == "entry":
                         best_status = "ok"
                         message = f"Plate '{ocr_text}' (conf: {yolo_confidence:.2f}) detected for '{stream_type}'."
-                        core_setup.logger.info(message) # Log primary success for entry
+                        core_setup.logger.info(message)
 
-                        # Example: If 'entry' still needs to call the old API with an image:
-                        # core_setup.logger.info(f"Condition met for API call (stream_type: {stream_type}). Preparing to call external API.")
-                        # image_for_api = cropped_color_plate_for_api if cropped_color_plate_for_api is not None and cropped_color_plate_for_api.size > 0 else img_np
-                        # entry_api_success, entry_api_msg = await call_external_parking_api(stream_type, ocr_text, image_for_api)
-                        # if not entry_api_success:
-                        #     best_status = "error_api_call" # Or a more specific status
-                        #     # message += f" | Entry API call failed: {entry_api_msg}" # Optional: append to message
-                        # else:
-                        #     # message += f" | Entry API call successful." # Optional: append to message
-
+                        # Use original full car image for entry API call
+                        if original_full_car_image is not None:
+                            core_setup.logger.info(f"Calling entry API with original full car image for plate '{ocr_text}'.")
+                            api_success, api_msg = await call_external_parking_api(stream_type, ocr_text, original_full_car_image)
+                            if not api_success:
+                                best_status = "error_api_call"
+                                core_setup.logger.error(f"Entry API call failed for plate '{ocr_text}': {api_msg}")
+                        else:
+                            core_setup.logger.error(f"Original full car image not available for entry API call for plate '{ocr_text}'.")
+                            best_status = "error_api_call"
+                    
                     else: # For other stream types, if any
                         best_status = "ok"
                         message = f"Plate '{ocr_text}' (conf: {yolo_confidence:.2f}) detected for '{stream_type}'."
